@@ -109,6 +109,14 @@ jobs:
         with:
           packages: ''
 
+      # Upstream builds on larger self-hosted runners; the 4 GB default heap runs out
+      # on GitHub's 16 GB runner when jetifying the native libraries for three ABIs.
+      - name: Give Gradle more memory
+        working-directory: ./mobile/android
+        run: |
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx8g -XX:MaxMetaspaceSize=2g -XX:+HeapDumpOnOutOfMemoryError/' gradle.properties
+          grep jvmargs gradle.properties
+
       - name: Create the keystore
         env:
           KEY_JKS: ${{ secrets.KEY_JKS }}
