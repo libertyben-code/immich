@@ -21,7 +21,7 @@ on:
         default: ''
         type: string
       install_mode:
-        description: 'side-by-side = separate "Immich Fork" app next to the store app; replace = official app id (store app must be uninstalled first)'
+        description: 'side-by-side = separate "Immich Boo" app next to the store app; replace = official app id (store app must be uninstalled first)'
         required: true
         default: 'side-by-side'
         type: choice
@@ -132,8 +132,8 @@ jobs:
         working-directory: ./mobile/android/app
         run: |
           echo "PR_NUMBER=fork" >> "$GITHUB_ENV"
-          sed -i 's/"Immich PR \${prNumber}"/"Immich Fork"/' build.gradle
-          grep -n 'Immich Fork' build.gradle
+          sed -i 's/"Immich PR \${prNumber}"/"Immich Boo"/' build.gradle
+          grep -n 'Immich Boo' build.gradle
 
       - name: Create the keystore
         env:
@@ -166,7 +166,7 @@ jobs:
           version=$(grep -m1 '^version:' mobile/pubspec.yaml | awk '{print $2}')
           tag="fork-v${version%%+*}-${INSTALL_MODE}-$(git rev-parse --short HEAD)"
           if [ "$INSTALL_MODE" = "side-by-side" ]; then
-            install_note='Installs as a separate app called "Immich Fork" (app.alextran.immich.prfork) next to the Play Store Immich.'
+            install_note='Installs as a separate app called "Immich Boo" (app.alextran.immich.prfork) next to the Play Store Immich.'
           else
             install_note='Uses the official app id: uninstall the Play Store Immich first. Later fork builds of this mode install as updates.'
           fi
