@@ -10,6 +10,7 @@ import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/server_capability.model.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
+import 'package:immich_mobile/presentation/actions/edited_copy.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/presentation/widgets/images/image_provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
@@ -61,6 +62,8 @@ class EditAssetAction extends AssetActionBuilder {
           EditImageRoute(
             image: Image(image: getFullImageProvider(asset, edited: false)),
             applyEdits: (newEdits) => applyEdits(ref, asset.id, newEdits),
+            saveCopy: (editorContext, geometry, adjustments) =>
+                saveAdjustedCopy(editorContext, ref, asset, geometry, adjustments),
           ),
         ),
       );
