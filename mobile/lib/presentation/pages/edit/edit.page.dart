@@ -8,12 +8,15 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/aspect_ratios.dart';
 import 'package:immich_mobile/domain/models/asset_edit.model.dart';
+import 'package:immich_mobile/domain/models/image_adjustments.model.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
+import 'package:immich_mobile/presentation/pages/edit/adjust.widget.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/providers/theme.provider.dart';
 import 'package:immich_mobile/theme/theme_data.dart';
 import 'package:immich_mobile/utils/editor.utils.dart';
+import 'package:immich_mobile/utils/image_render.utils.dart';
 import 'package:immich_mobile/widgets/common/immich_toast.dart';
 import 'package:immich_ui/immich_ui.dart';
 import 'package:openapi/api.dart' show MirrorAxis, MirrorParameters, RotateParameters;
@@ -23,14 +26,28 @@ class EditImagePage extends ConsumerStatefulWidget {
   final Image image;
   final Future<void> Function(List<AssetEdit> edits) applyEdits;
 
-  const EditImagePage({super.key, required this.image, required this.applyEdits});
+  /// Saves colour/size adjustments, which the server can't apply, as a new
+  /// copy rendered on the device. Returns whether a copy was saved.
+  /// Without it the editor only offers crop, rotate and mirror.
+  final Future<bool> Function(BuildContext context, RenderGeometry geometry, ImageAdjustments adjustments)? saveCopy;
+
+  const EditImagePage({super.key, required this.image, required this.applyEdits, this.saveCopy});
 
   @override
   ConsumerState<EditImagePage> createState() => _EditImagePageState();
 }
 
+enum _EditorTab { crop, adjust }
+
 class _EditImagePageState extends ConsumerState<EditImagePage> with TickerProviderStateMixin {
+  _EditorTab _tab = _EditorTab.crop;
+
   Future<void> _saveEditedImage() async {
+    final adjustments = ref.read(imageAdjustmentsProvider);
+    if (!adjustments.isIdentity && widget.saveCopy != null) {
+      return _saveAdjustedCopy(adjustments);
+    }
+
     ref.read(editorStateProvider.notifier).setIsEditing(true);
 
     final editorState = ref.read(editorStateProvider);
@@ -77,6 +94,18 @@ class _EditImagePageState extends ConsumerState<EditImagePage> with TickerProvid
     }
   }
 
+  Future<void> _saveAdjustedCopy(ImageAdjustments adjustments) async {
+    final notifier = ref.read(editorStateProvider.notifier)..setIsEditing(true);
+    try {
+      final saved = await widget.saveCopy!(context, ref.read(editorStateProvider).geometry, adjustments);
+      if (saved && mounted) {
+        Navigator.of(context).pop();
+      }
+    } finally {
+      notifier.setIsEditing(false);
+    }
+  }
+
   Future<bool?> _showDiscardChangesDialog() {
     return showDialog<bool>(
       context: context,
@@ -99,7 +128,10 @@ class _EditImagePageState extends ConsumerState<EditImagePage> with TickerProvid
 
   @override
   Widget build(BuildContext context) {
-    final hasUnsavedEdits = ref.watch(editorStateProvider.select((state) => state.hasUnsavedEdits));
+    final hasUnsavedEdits =
+        ref.watch(editorStateProvider.select((state) => state.hasUnsavedEdits)) ||
+        !ref.watch(imageAdjustmentsProvider.select((adjustments) => adjustments.isIdentity));
+    final isAdjusting = _tab == _EditorTab.adjust;
 
     return PopScope(
       canPop: !hasUnsavedEdits,
@@ -126,7 +158,11 @@ class _EditImagePageState extends ConsumerState<EditImagePage> with TickerProvid
             bottom: false,
             child: Column(
               children: [
-                Expanded(child: _EditorPreview(image: widget.image)),
+                Expanded(
+                  child: isAdjusting
+                      ? AdjustPreview(image: widget.image.image)
+                      : AdjustedColors(child: _EditorPreview(image: widget.image)),
+                ),
                 AnimatedSize(
                   duration: const Duration(milliseconds: 250),
                   curve: Curves.easeInOut,
@@ -141,11 +177,13 @@ class _EditImagePageState extends ConsumerState<EditImagePage> with TickerProvid
                         topRight: Radius.circular(20),
                       ),
                     ),
-                    child: const Column(
+                    child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _TransformControls(),
-                        Padding(
+                        if (widget.saveCopy != null)
+                          _EditorTabs(selected: _tab, onSelected: (tab) => setState(() => _tab = tab)),
+                        if (isAdjusting) const AdjustControls() else const _TransformControls(),
+                        const Padding(
                           padding: EdgeInsets.only(bottom: 36, left: 24, right: 24),
                           child: Row(children: [Spacer(), _ResetEditsButton()]),
                         ),
@@ -307,6 +345,37 @@ class _TransformControls extends ConsumerWidget {
   }
 }
 
+class _EditorTabs extends StatelessWidget {
+  final _EditorTab selected;
+  final ValueChanged<_EditorTab> onSelected;
+
+  const _EditorTabs({required this.selected, required this.onSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget tab(_EditorTab value, IconData icon, String label) {
+      final color = value == selected ? context.primaryColor : context.themeData.colorScheme.onSurfaceVariant;
+      return TextButton.icon(
+        onPressed: () => onSelected(value),
+        icon: Icon(icon, color: color, size: 20),
+        label: Text(label, style: context.textTheme.labelLarge?.copyWith(color: color)),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          tab(_EditorTab.crop, Icons.crop_rotate_rounded, context.t.crop),
+          const SizedBox(width: 24),
+          tab(_EditorTab.adjust, Icons.tune_rounded, context.t.editor_adjust),
+        ],
+      ),
+    );
+  }
+}
+
 class _SaveEditsButton extends ConsumerWidget {
   final VoidCallback onSave;
 
@@ -315,7 +384,9 @@ class _SaveEditsButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isApplyingEdits = ref.watch(editorStateProvider.select((state) => state.isApplyingEdits));
-    final hasUnsavedEdits = ref.watch(editorStateProvider.select((state) => state.hasUnsavedEdits));
+    final hasUnsavedEdits =
+        ref.watch(editorStateProvider.select((state) => state.hasUnsavedEdits)) ||
+        !ref.watch(imageAdjustmentsProvider.select((adjustments) => adjustments.isIdentity));
 
     return isApplyingEdits
         ? const Padding(
@@ -339,13 +410,17 @@ class _ResetEditsButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final editorState = ref.watch(editorStateProvider);
     final editorNotifier = ref.watch(editorStateProvider.notifier);
+    final hasAdjustments = !ref.watch(imageAdjustmentsProvider.select((adjustments) => adjustments.isIdentity));
 
     return ImmichTextButton(
       labelText: context.t.reset,
-      onPressed: editorNotifier.resetEdits,
+      onPressed: () {
+        editorNotifier.resetEdits();
+        ref.read(imageAdjustmentsProvider.notifier).reset();
+      },
       variant: ImmichVariant.ghost,
       expanded: false,
-      disabled: !editorState.hasEdits || editorState.isApplyingEdits,
+      disabled: !(editorState.hasEdits || hasAdjustments) || editorState.isApplyingEdits,
     );
   }
 }
