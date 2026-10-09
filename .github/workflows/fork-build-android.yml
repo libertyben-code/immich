@@ -20,6 +20,14 @@ on:
         required: false
         default: ''
         type: string
+      install_mode:
+        description: 'side-by-side = separate "Immich Fork" app next to the store app; replace = official app id (store app must be uninstalled first)'
+        required: true
+        default: 'side-by-side'
+        type: choice
+        options:
+          - side-by-side
+          - replace
 
 permissions: {}
 
@@ -117,6 +125,16 @@ jobs:
           sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx8g -XX:MaxMetaspaceSize=2g -XX:+HeapDumpOnOutOfMemoryError/' gradle.properties
           grep jvmargs gradle.properties
 
+      # Reuses upstream's PR-build hook in build.gradle: PR_NUMBER adds an applicationId
+      # suffix, so the app installs next to the store version instead of replacing it.
+      - name: Configure side-by-side app id
+        if: ${{ inputs.install_mode == 'side-by-side' }}
+        working-directory: ./mobile/android/app
+        run: |
+          echo "PR_NUMBER=fork" >> "$GITHUB_ENV"
+          sed -i 's/"Immich PR \${prNumber}"/"Immich Fork"/' build.gradle
+          grep -n 'Immich Fork' build.gradle
+
       - name: Create the keystore
         env:
           KEY_JKS: ${{ secrets.KEY_JKS }}
@@ -143,17 +161,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IMMICH_REF: ${{ inputs.immich_ref }}
+          INSTALL_MODE: ${{ inputs.install_mode }}
         run: |
           version=$(grep -m1 '^version:' mobile/pubspec.yaml | awk '{print $2}')
-          tag="fork-v${version%%+*}-$(git rev-parse --short HEAD)"
+          tag="fork-v${version%%+*}-${INSTALL_MODE}-$(git rev-parse --short HEAD)"
+          if [ "$INSTALL_MODE" = "side-by-side" ]; then
+            install_note='Installs as a separate app called "Immich Fork" (app.alextran.immich.prfork) next to the Play Store Immich.'
+          else
+            install_note='Uses the official app id: uninstall the Play Store Immich first. Later fork builds of this mode install as updates.'
+          fi
           based_on="${IMMICH_REF:-$(git describe --tags --abbrev=0 2>/dev/null || echo unknown)}"
           cd mobile/build/app/outputs/flutter-apk
           for f in app-*-release.apk; do mv "$f" "immich-fork-${f#app-}"; done
           sha256sum immich-fork-*.apk > SHA256SUMS
           gh release create "$tag" immich-fork-*.apk SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Immich fork ${version%%+*} ($(git rev-parse --short HEAD))" \
+            --title "Immich fork ${version%%+*} (${INSTALL_MODE}, $(git rev-parse --short HEAD))" \
             --notes "Built from \`${GITHUB_SHA}\`, rebased onto upstream \`${based_on}\`.
 
           Install **immich-fork-arm64-v8a-release.apk** on modern phones (e.g. Pixel 8 Pro).
-          Signed with this fork's key, so it updates over the previous fork build. It cannot update over the Play Store app."
+          ${install_note}
+          Signed with this fork's key, so it updates over the previous fork build of the same mode."
