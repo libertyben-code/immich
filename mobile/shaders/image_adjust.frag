@@ -21,6 +21,9 @@ uniform float uSaturation;
 uniform float uVibrance;
 uniform float uWarmth;
 uniform float uTint;
+uniform float uSharpness;
+// unsharp mask radius in pixels, scaled with the image size
+uniform float uSharpenRadius;
 uniform sampler2D uImage;
 
 out vec4 fragColor;
@@ -31,6 +34,29 @@ void main() {
   vec2 uv = FlutterFragCoord().xy / uSize;
   vec4 texel = texture(uImage, uv);
   vec3 c = texel.a > 0.0 ? texel.rgb / texel.a : vec3(0.0);
+
+  // sharpness: unsharp mask on the luminance, so edges don't get colour
+  // fringes; below 0 it softens towards the blurred image instead
+  if (uSharpness != 0.0) {
+    vec2 d = uSharpenRadius / uSize;
+    vec2 lo = 0.5 / uSize;
+    vec2 hi = 1.0 - lo;
+    vec3 blur = 4.0 * texture(uImage, uv).rgb;
+    blur += 2.0 * texture(uImage, clamp(uv + vec2(d.x, 0.0), lo, hi)).rgb;
+    blur += 2.0 * texture(uImage, clamp(uv - vec2(d.x, 0.0), lo, hi)).rgb;
+    blur += 2.0 * texture(uImage, clamp(uv + vec2(0.0, d.y), lo, hi)).rgb;
+    blur += 2.0 * texture(uImage, clamp(uv - vec2(0.0, d.y), lo, hi)).rgb;
+    blur += texture(uImage, clamp(uv + d, lo, hi)).rgb;
+    blur += texture(uImage, clamp(uv - d, lo, hi)).rgb;
+    blur += texture(uImage, clamp(uv + vec2(d.x, -d.y), lo, hi)).rgb;
+    blur += texture(uImage, clamp(uv + vec2(-d.x, d.y), lo, hi)).rgb;
+    blur /= 16.0;
+    if (uSharpness > 0.0) {
+      c += 2.0 * uSharpness * dot(c - blur, kLuma);
+    } else {
+      c = mix(c, blur, -uSharpness);
+    }
+  }
 
   // brightness as exposure: up to one stop darker or brighter
   c *= exp2(uBrightness);

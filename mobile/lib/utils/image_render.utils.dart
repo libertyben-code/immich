@@ -162,6 +162,9 @@ ui.Picture _framePicture(ui.Image image, RenderSize size, RenderGeometry geometr
   for (final tone in ToneAdjustment.values) {
     shader.setFloat(2 + tone.index, adjustments[tone]);
   }
+  // about 1px on the preview and up to 2.5px on a full-size photo, so the
+  // sharpening looks alike at the size it is viewed
+  shader.setFloat(2 + ToneAdjustment.values.length, (max(source.width, source.height) / 1600).clamp(1.0, 2.5));
   shader.setImageSampler(0, source);
 
   final recorder = ui.PictureRecorder();

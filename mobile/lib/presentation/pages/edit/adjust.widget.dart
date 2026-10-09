@@ -181,6 +181,7 @@ extension on ToneAdjustment {
     ToneAdjustment.vibrance => Icons.auto_awesome_outlined,
     ToneAdjustment.warmth => Icons.thermostat,
     ToneAdjustment.tint => Icons.water_drop_outlined,
+    ToneAdjustment.sharpness => Icons.deblur,
   };
 
   String label(BuildContext context) => switch (this) {
@@ -195,6 +196,7 @@ extension on ToneAdjustment {
     ToneAdjustment.vibrance => context.t.editor_vibrance,
     ToneAdjustment.warmth => context.t.editor_warmth,
     ToneAdjustment.tint => context.t.editor_tint,
+    ToneAdjustment.sharpness => context.t.editor_sharpness,
   };
 }
 
