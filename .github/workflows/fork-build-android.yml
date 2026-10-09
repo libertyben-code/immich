@@ -1,0 +1,151 @@
+name: Fork - Build Android APK
+
+# Builds a signed release APK of this fork and publishes it as a GitHub Release.
+#
+# Optionally rebases the fork's commits onto an upstream Immich tag first, so the
+# app can be kept in step with the server version:
+#   Actions -> "Fork - Build Android APK" -> Run workflow -> immich_ref: v3.3.0
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   KEY_JKS                 base64 of the signing keystore (android/key.jks)
+#   ALIAS                   key alias inside the keystore
+#   ANDROID_KEY_PASSWORD    key password
+#   ANDROID_STORE_PASSWORD  keystore password
+
+on:
+  workflow_dispatch:
+    inputs:
+      immich_ref:
+        description: 'Upstream Immich tag or branch to rebase onto (e.g. v3.3.0). Empty = build the branch as-is.'
+        required: false
+        default: ''
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write # create the GitHub Release
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebase onto upstream Immich
+        if: ${{ inputs.immich_ref != '' }}
+        env:
+          IMMICH_REF: ${{ inputs.immich_ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/immich-app/immich.git
+          git fetch --no-tags upstream main:refs/remotes/upstream/main
+          if git fetch --no-tags upstream "+refs/tags/${IMMICH_REF}:refs/tags/${IMMICH_REF}"; then
+            target="refs/tags/${IMMICH_REF}"
+          else
+            git fetch --no-tags upstream "+refs/heads/${IMMICH_REF}:refs/remotes/upstream/${IMMICH_REF}"
+            target="refs/remotes/upstream/${IMMICH_REF}"
+          fi
+          # Replay only this fork's own commits (those not in upstream main) onto the target.
+          fork_base=$(git merge-base HEAD refs/remotes/upstream/main)
+          git rebase --onto "$target" "$fork_base" \
+            || { echo "::error::Rebasing onto ${IMMICH_REF} hit conflicts. Resolve them locally and push."; git rebase --abort; exit 1; }
+          git log --oneline -5
+
+      - name: Check signing secrets
+        env:
+          KEY_JKS: ${{ secrets.KEY_JKS }}
+        run: |
+          if [ -z "$KEY_JKS" ]; then
+            echo "::error::KEY_JKS secret is missing. Without it each build is signed with a throwaway key and cannot update the previous install."
+            exit 1
+          fi
+
+      - name: Restore Rust cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fork-rust-${{ runner.os }}-${{ hashFiles('native/crates/native_core_ffi/rust-toolchain.toml', 'native/Cargo.lock') }}
+          restore-keys: fork-rust-${{ runner.os }}-
+
+      - name: Restore Gradle cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            mobile/android/.gradle
+          key: fork-gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/android/gradle/libs.versions.toml') }}
+          restore-keys: fork-gradle-${{ runner.os }}-
+
+      - name: Setup mise
+        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8 # use-mise-action-v3.2.1
+        with:
+          github_token: ${{ github.token }}
+          working_directory: ./mobile
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: ''
+
+      - name: Create the keystore
+        env:
+          KEY_JKS: ${{ secrets.KEY_JKS }}
+        working-directory: ./mobile
+        run: printf "%s" "$KEY_JKS" | base64 -d > android/key.jks
+
+      - name: Install dependencies
+        run: mise //mobile:install:ci
+
+      - name: Codegen
+        run: mise //mobile:codegen
+
+      - name: Build APKs
+        working-directory: ./mobile
+        env:
+          ALIAS: ${{ secrets.ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64
+          rm -f android/key.jks
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMMICH_REF: ${{ inputs.immich_ref }}
+        run: |
+          version=$(grep -m1 '^version:' mobile/pubspec.yaml | awk '{print $2}')
+          tag="fork-v${version%%+*}-$(git rev-parse --short HEAD)"
+          based_on="${IMMICH_REF:-$(git describe --tags --abbrev=0 2>/dev/null || echo unknown)}"
+          cd mobile/build/app/outputs/flutter-apk
+          for f in app-*-release.apk; do mv "$f" "immich-fork-${f#app-}"; done
+          sha256sum immich-fork-*.apk > SHA256SUMS
+          gh release create "$tag" immich-fork-*.apk SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Immich fork ${version%%+*} ($(git rev-parse --short HEAD))" \
+            --notes "Built from \`${GITHUB_SHA}\`, rebased onto upstream \`${based_on}\`.
+
+          Install **immich-fork-arm64-v8a-release.apk** on modern phones (e.g. Pixel 8 Pro).
+          Signed with this fork's key, so it updates over the previous fork build. It cannot update over the Play Store app."
