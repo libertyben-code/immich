@@ -159,9 +159,7 @@ class _EditImagePageState extends ConsumerState<EditImagePage> with TickerProvid
             child: Column(
               children: [
                 Expanded(
-                  child: isAdjusting
-                      ? AdjustPreview(image: widget.image.image)
-                      : AdjustedColors(child: _EditorPreview(image: widget.image)),
+                  child: isAdjusting ? AdjustPreview(image: widget.image.image) : _EditorPreview(image: widget.image),
                 ),
                 AnimatedSize(
                   duration: const Duration(milliseconds: 250),

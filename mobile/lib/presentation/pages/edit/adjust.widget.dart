@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/image_adjustments.model.dart';
@@ -5,6 +8,12 @@ import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/utils/image_render.utils.dart';
+import 'package:logging/logging.dart';
+
+final _log = Logger('AdjustPreview');
+
+/// Long edge of the live preview; the saved copy uses the full resolution.
+const _previewLongEdge = 1600;
 
 /// Colour and size adjustments of the photo open in the editor. They are
 /// rendered on the device into a new copy when saved, see [ImageAdjustments].
@@ -18,15 +27,9 @@ class ImageAdjustmentsNotifier extends AutoDisposeNotifier<ImageAdjustments> {
 
   void reset() => state = ImageAdjustments.none;
 
-  void setBrightness(double value) => state = state.copyWith(brightness: value);
+  void setTone(ToneAdjustment tone, double value) => state = state.withTone(tone, value);
 
-  void setContrast(double value) => state = state.copyWith(contrast: value);
-
-  void setSaturation(double value) => state = state.copyWith(saturation: value);
-
-  void setWarmth(double value) => state = state.copyWith(warmth: value);
-
-  void setMaxLongEdge(int? value) => state = state.copyWith(maxLongEdge: () => value);
+  void setMaxLongEdge(int? value) => state = state.withMaxLongEdge(value);
 }
 
 extension EditorStateGeometry on EditorState {
@@ -34,24 +37,8 @@ extension EditorStateGeometry on EditorState {
       (crop: crop, rotation: rotationAngle, flipHorizontal: flipHorizontal, flipVertical: flipVertical);
 }
 
-/// Wraps [child] with the live colour preview of the current adjustments.
-class AdjustedColors extends ConsumerWidget {
-  final Widget child;
-
-  const AdjustedColors({super.key, required this.child});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final adjustments = ref.watch(imageAdjustmentsProvider);
-    if (!adjustments.hasColorChanges) {
-      return child;
-    }
-    return ColorFiltered(colorFilter: ColorFilter.matrix(adjustments.colorMatrix), child: child);
-  }
-}
-
-/// The photo as it will be saved: cropped, mirrored and rotated, with the
-/// colour adjustments applied. Press and hold to compare with the original.
+/// The photo as it will be saved: cropped, mirrored and rotated, rendered with
+/// the same shader as the saved copy. Press and hold to compare with the original.
 class AdjustPreview extends ConsumerStatefulWidget {
   final ImageProvider image;
 
@@ -62,79 +49,152 @@ class AdjustPreview extends ConsumerStatefulWidget {
 }
 
 class _AdjustPreviewState extends ConsumerState<AdjustPreview> {
+  ImageStream? _stream;
+  late final _listener = ImageStreamListener(_onImage, onError: _onImageError);
+  ui.FragmentProgram? _program;
   bool _showOriginal = false;
+
+  // the decoded preview, the framed (cropped/rotated) copy and the adjusted one
+  ui.Image? _source;
+  ui.Image? _framed;
+  RenderGeometry? _framedFor;
+  ui.Image? _adjusted;
+  ImageAdjustments? _adjustedFor;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadProgram());
+  }
+
+  Future<void> _loadProgram() async {
+    try {
+      final program = await loadAdjustmentShader();
+      if (mounted) {
+        setState(() => _program = program);
+      }
+    } catch (error, stack) {
+      _log.severe('Failed to load the adjustment shader', error, stack);
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final stream = widget.image.resolve(createLocalImageConfiguration(context));
+    if (stream.key != _stream?.key) {
+      _stream?.removeListener(_listener);
+      _stream = stream..addListener(_listener);
+    }
+  }
+
+  void _onImage(ImageInfo info, bool _) {
+    if (!mounted) {
+      info.dispose();
+      return;
+    }
+    setState(() {
+      _source?.dispose();
+      _source = info.image;
+      _clearFramed();
+    });
+  }
+
+  void _onImageError(Object error, StackTrace? stack) => _log.warning('Failed to load the preview image', error, stack);
+
+  void _clearFramed() {
+    _framed?.dispose();
+    _framed = null;
+    _framedFor = null;
+    _clearAdjusted();
+  }
+
+  void _clearAdjusted() {
+    _adjusted?.dispose();
+    _adjusted = null;
+    _adjustedFor = null;
+  }
+
+  @override
+  void dispose() {
+    _stream?.removeListener(_listener);
+    _clearFramed();
+    _source?.dispose();
+    super.dispose();
+  }
+
+  /// The image to show, re-rendered only when the geometry or adjustments change.
+  ui.Image? _render(RenderGeometry geometry, ImageAdjustments adjustments) {
+    final source = _source;
+    if (source == null) {
+      return null;
+    }
+    if (_framed == null || _framedFor != geometry) {
+      _clearFramed();
+      _framed = frameImageSync(source, geometry, maxLongEdge: _previewLongEdge);
+      _framedFor = geometry;
+    }
+
+    final program = _program;
+    if (_showOriginal || program == null || !adjustments.hasToneChanges) {
+      return _framed;
+    }
+    if (_adjusted == null || _adjustedFor != adjustments) {
+      _clearAdjusted();
+      _adjusted = adjustImageSync(program, _framed!, adjustments);
+      _adjustedFor = adjustments;
+    }
+    return _adjusted;
+  }
 
   @override
   Widget build(BuildContext context) {
-    final editorState = ref.watch(editorStateProvider);
-    final width = editorState.originalWidth.toDouble();
-    final height = editorState.originalHeight.toDouble();
-    final crop = editorState.crop;
-
-    // where the crop sits within the image, as an alignment of -1..1
-    double align(double start, double extent) => extent >= 1 ? 0 : (start / (1 - extent)) * 2 - 1;
-
-    Widget preview = width > 0 && height > 0
-        ? SizedBox(
-            width: crop.width * width,
-            height: crop.height * height,
-            child: ClipRect(
-              child: OverflowBox(
-                alignment: Alignment(align(crop.left, crop.width), align(crop.top, crop.height)),
-                minWidth: width,
-                maxWidth: width,
-                minHeight: height,
-                maxHeight: height,
-                child: Image(image: widget.image, fit: BoxFit.fill, gaplessPlayback: true),
-              ),
-            ),
-          )
-        : Image(image: widget.image, gaplessPlayback: true);
-
-    preview = RotatedBox(
-      quarterTurns: (((editorState.rotationAngle % 360) + 360) % 360) ~/ 90,
-      child: Transform.flip(flipX: editorState.flipHorizontal, flipY: editorState.flipVertical, child: preview),
-    );
-    if (!_showOriginal) {
-      preview = AdjustedColors(child: preview);
-    }
+    final geometry = ref.watch(editorStateProvider.select((state) => state.geometry));
+    final adjustments = ref.watch(imageAdjustmentsProvider);
+    final image = _render(geometry, adjustments);
 
     return GestureDetector(
       onLongPressStart: (_) => setState(() => _showOriginal = true),
       onLongPressEnd: (_) => setState(() => _showOriginal = false),
       child: Padding(
         padding: const EdgeInsets.all(20),
-        child: Center(child: FittedBox(child: preview)),
+        child: image == null
+            ? const Center(child: CircularProgressIndicator())
+            : SizedBox.expand(
+                child: RawImage(image: image, fit: BoxFit.contain),
+              ),
       ),
     );
   }
 }
 
-enum _AdjustTool {
-  brightness(Icons.brightness_6_outlined),
-  contrast(Icons.contrast),
-  saturation(Icons.palette_outlined),
-  warmth(Icons.thermostat),
-  resize(Icons.photo_size_select_large);
-
-  final IconData icon;
-
-  const _AdjustTool(this.icon);
-
-  String label(BuildContext context) => switch (this) {
-    _AdjustTool.brightness => context.t.editor_brightness,
-    _AdjustTool.contrast => context.t.editor_contrast,
-    _AdjustTool.saturation => context.t.editor_saturation,
-    _AdjustTool.warmth => context.t.editor_warmth,
-    _AdjustTool.resize => context.t.editor_resize,
+extension on ToneAdjustment {
+  IconData get icon => switch (this) {
+    ToneAdjustment.brightness => Icons.brightness_6_outlined,
+    ToneAdjustment.contrast => Icons.contrast,
+    ToneAdjustment.whitePoint => Icons.wb_sunny_outlined,
+    ToneAdjustment.highlights => Icons.flare,
+    ToneAdjustment.shadows => Icons.dark_mode_outlined,
+    ToneAdjustment.blackPoint => Icons.circle,
+    ToneAdjustment.vignette => Icons.vignette_outlined,
+    ToneAdjustment.saturation => Icons.palette_outlined,
+    ToneAdjustment.vibrance => Icons.auto_awesome_outlined,
+    ToneAdjustment.warmth => Icons.thermostat,
+    ToneAdjustment.tint => Icons.water_drop_outlined,
   };
 
-  bool isChanged(ImageAdjustments adjustments) => switch (this) {
-    _AdjustTool.brightness => adjustments.brightness != 0,
-    _AdjustTool.contrast => adjustments.contrast != 0,
-    _AdjustTool.saturation => adjustments.saturation != 0,
-    _AdjustTool.warmth => adjustments.warmth != 0,
-    _AdjustTool.resize => adjustments.maxLongEdge != null,
+  String label(BuildContext context) => switch (this) {
+    ToneAdjustment.brightness => context.t.editor_brightness,
+    ToneAdjustment.contrast => context.t.editor_contrast,
+    ToneAdjustment.whitePoint => context.t.editor_white_point,
+    ToneAdjustment.highlights => context.t.editor_highlights,
+    ToneAdjustment.shadows => context.t.editor_shadows,
+    ToneAdjustment.blackPoint => context.t.editor_black_point,
+    ToneAdjustment.vignette => context.t.editor_vignette,
+    ToneAdjustment.saturation => context.t.editor_saturation,
+    ToneAdjustment.vibrance => context.t.editor_vibrance,
+    ToneAdjustment.warmth => context.t.editor_warmth,
+    ToneAdjustment.tint => context.t.editor_tint,
   };
 }
 
@@ -146,11 +206,13 @@ class AdjustControls extends ConsumerStatefulWidget {
 }
 
 class _AdjustControlsState extends ConsumerState<AdjustControls> {
-  _AdjustTool _tool = _AdjustTool.brightness;
+  /// The selected slider, `null` when resize is selected.
+  ToneAdjustment? _tone = ToneAdjustment.brightness;
 
   @override
   Widget build(BuildContext context) {
     final adjustments = ref.watch(imageAdjustmentsProvider);
+    final tone = _tone;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -161,17 +223,25 @@ class _AdjustControlsState extends ConsumerState<AdjustControls> {
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: [
-              for (final tool in _AdjustTool.values)
+              for (final value in ToneAdjustment.values)
                 _ToolButton(
-                  tool: tool,
-                  isSelected: tool == _tool,
-                  isChanged: tool.isChanged(adjustments),
-                  onPressed: () => setState(() => _tool = tool),
+                  icon: value.icon,
+                  label: value.label(context),
+                  isSelected: value == tone,
+                  isChanged: adjustments[value] != 0,
+                  onPressed: () => setState(() => _tone = value),
                 ),
+              _ToolButton(
+                icon: Icons.photo_size_select_large,
+                label: context.t.editor_resize,
+                isSelected: tone == null,
+                isChanged: adjustments.maxLongEdge != null,
+                onPressed: () => setState(() => _tone = null),
+              ),
             ],
           ),
         ),
-        SizedBox(height: 64, child: _tool == _AdjustTool.resize ? const _ResizeOptions() : _AdjustSlider(tool: _tool)),
+        SizedBox(height: 64, child: tone == null ? const _ResizeOptions() : _AdjustSlider(tone: tone)),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Text(
@@ -187,12 +257,19 @@ class _AdjustControlsState extends ConsumerState<AdjustControls> {
 }
 
 class _ToolButton extends StatelessWidget {
-  final _AdjustTool tool;
+  final IconData icon;
+  final String label;
   final bool isSelected;
   final bool isChanged;
   final VoidCallback onPressed;
 
-  const _ToolButton({required this.tool, required this.isSelected, required this.isChanged, required this.onPressed});
+  const _ToolButton({
+    required this.icon,
+    required this.label,
+    required this.isSelected,
+    required this.isChanged,
+    required this.onPressed,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -209,11 +286,11 @@ class _ToolButton extends StatelessWidget {
             offset: const Offset(-6, 6),
             child: IconButton(
               iconSize: 28,
-              icon: Icon(tool.icon, color: color),
+              icon: Icon(icon, color: color),
               onPressed: onPressed,
             ),
           ),
-          Text(tool.label(context), style: context.textTheme.labelSmall?.copyWith(color: color)),
+          Text(label, style: context.textTheme.labelSmall?.copyWith(color: color)),
         ],
       ),
     );
@@ -221,21 +298,14 @@ class _ToolButton extends StatelessWidget {
 }
 
 class _AdjustSlider extends ConsumerWidget {
-  final _AdjustTool tool;
+  final ToneAdjustment tone;
 
-  const _AdjustSlider({required this.tool});
+  const _AdjustSlider({required this.tone});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final adjustments = ref.watch(imageAdjustmentsProvider);
+    final value = ref.watch(imageAdjustmentsProvider.select((adjustments) => adjustments[tone]));
     final notifier = ref.watch(imageAdjustmentsProvider.notifier);
-    final (value, onChanged) = switch (tool) {
-      _AdjustTool.brightness => (adjustments.brightness, notifier.setBrightness),
-      _AdjustTool.contrast => (adjustments.contrast, notifier.setContrast),
-      _AdjustTool.saturation => (adjustments.saturation, notifier.setSaturation),
-      _AdjustTool.warmth => (adjustments.warmth, notifier.setWarmth),
-      _AdjustTool.resize => throw StateError('resize has no slider'),
-    };
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -247,14 +317,14 @@ class _AdjustSlider extends ConsumerWidget {
               min: -100,
               max: 100,
               divisions: 200,
-              onChanged: (newValue) => onChanged(newValue.roundToDouble() / 100),
+              onChanged: (newValue) => notifier.setTone(tone, newValue.roundToDouble() / 100),
             ),
           ),
           SizedBox(
             width: 40,
             child: GestureDetector(
               // tap the number to reset this adjustment
-              onTap: () => onChanged(0),
+              onTap: () => notifier.setTone(tone, 0),
               child: Text('${(value * 100).round()}', textAlign: TextAlign.end, style: context.textTheme.labelLarge),
             ),
           ),
@@ -276,7 +346,7 @@ class _ResizeOptions extends ConsumerWidget {
     final notifier = ref.watch(imageAdjustmentsProvider.notifier);
 
     final knownSize = editorState.originalWidth > 0 && editorState.originalHeight > 0;
-    ({int width, int height})? sizeFor(int? longEdge) => knownSize
+    RenderSize? sizeFor(int? longEdge) => knownSize
         ? renderedSize(editorState.originalWidth, editorState.originalHeight, editorState.geometry, longEdge)
         : null;
     final full = sizeFor(null);
@@ -291,8 +361,7 @@ class _ResizeOptions extends ConsumerWidget {
       ),
     );
 
-    String describe(({int width, int height})? size, String fallback) =>
-        size == null ? fallback : '${size.width} × ${size.height}';
+    String describe(RenderSize? size, String fallback) => size == null ? fallback : '${size.width} × ${size.height}';
 
     return Center(
       child: SingleChildScrollView(
