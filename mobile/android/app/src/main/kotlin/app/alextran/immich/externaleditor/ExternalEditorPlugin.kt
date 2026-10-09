@@ -99,6 +99,8 @@ class ExternalEditorPlugin : FlutterPlugin, ActivityAware, PluginRegistry.Activi
 
     var mediaUri: Uri? = null
     try {
+      // A crash or kill during an earlier edit could have left a scratch copy in the gallery.
+      deleteStaleScratchMedia(context)
       // Publish a private copy so an in-place edit never touches the gallery original.
       mediaUri = insertScratchMedia(context, File(path), mimeType)
       val (size, modified) = queryMediaStats(context, mediaUri)
@@ -135,7 +137,7 @@ class ExternalEditorPlugin : FlutterPlugin, ActivityAware, PluginRegistry.Activi
       return true
     }
 
-    Log.i(TAG, "Editor returned resultCode=$resultCode data=${data?.data} extras=${data?.extras?.keySet()}")
+    Log.d(TAG, "Editor returned resultCode=$resultCode data=${data?.data} extras=${data?.extras?.keySet()}")
     try {
       val returnedUri = data?.data
       val (sizeAfter, modifiedAfter) = queryMediaStats(context, edit.mediaUri)
@@ -148,7 +150,7 @@ class ExternalEditorPlugin : FlutterPlugin, ActivityAware, PluginRegistry.Activi
         // 3. cancelled, or saved somewhere we cannot see
         else -> null
       }
-      Log.i(TAG, "Edit result: ${result?.absolutePath}")
+      Log.d(TAG, "Edit result: ${result?.absolutePath}")
       edit.callback(Result.success(result?.absolutePath))
     } catch (e: Exception) {
       Log.w(TAG, "Failed to read external editor result", e)
@@ -188,6 +190,23 @@ class ExternalEditorPlugin : FlutterPlugin, ActivityAware, PluginRegistry.Activi
       source.inputStream().use { input -> input.copyTo(output) }
     } ?: throw IllegalStateException("Cannot write to $uri")
     return uri
+  }
+
+  /// Removes scratch items this app inserted earlier. Scoped storage only lets an
+  /// app delete its own items, so this cannot touch anything else in the folder.
+  private fun deleteStaleScratchMedia(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+    try {
+      val deleted = context.contentResolver.delete(
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+        "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? AND " +
+          "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ?",
+        arrayOf("$MEDIA_RELATIVE_DIR%", "immich_edit_%", context.packageName),
+      )
+      if (deleted > 0) Log.i(TAG, "Removed $deleted stale scratch item(s)")
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to remove stale scratch items", e)
+    }
   }
 
   private fun queryMediaStats(context: Context, uri: Uri): Pair<Long, Long> {

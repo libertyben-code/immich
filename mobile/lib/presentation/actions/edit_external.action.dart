@@ -31,8 +31,22 @@ final _stateProvider = Provider.family.autoDispose<BaseAsset?, ActionSource>((re
   }
   final assets = ref.watch(assetsActionProvider(source));
   final asset = assets.singleOrNull;
-  return asset != null && asset.isImage ? asset : null;
+  if (asset == null || !asset.isImage) {
+    return null;
+  }
+  // Never copy locked-folder or trashed photos into shared storage for another app.
+  if (asset case RemoteAsset(isLocked: true) || RemoteAsset(isTrashed: true)) {
+    return null;
+  }
+  return asset;
 }, dependencies: [assetsActionProvider]);
+
+/// The server original can only be stacked or trashed by its owner. A local
+/// photo's remote copy was uploaded by this user; a remote one must match.
+bool _ownsServerCopy(BaseAsset asset, String userId) => switch (asset) {
+  LocalAsset() => true,
+  RemoteAsset(:final ownerId) => ownerId == userId,
+};
 
 /// Opens the photo in a third-party editor, then uploads the result as a new
 /// asset stacked on top of the original. The original is never modified.
@@ -115,9 +129,10 @@ class ExternalEditAction extends AssetActionBuilder {
       );
       tempFiles.add(edited);
 
-      // 4. keep both (stacked) or replace the original? Replacing only makes
-      // sense for a server asset; a local-only photo has nothing to trash remotely.
-      final originalRemoteId = asset.remoteId;
+      // 4. keep both (stacked) or replace the original? Only for a server copy
+      // this user owns: a local-only photo has nothing to trash remotely, and a
+      // partner's or shared-album photo can't be stacked or trashed by us.
+      final originalRemoteId = _ownsServerCopy(asset, userId) ? asset.remoteId : null;
       if (!context.mounted) {
         return;
       }
