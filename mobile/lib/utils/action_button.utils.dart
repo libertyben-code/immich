@@ -13,6 +13,7 @@ import 'package:immich_mobile/presentation/actions/asset_debug.action.dart';
 import 'package:immich_mobile/presentation/actions/cast.action.dart';
 import 'package:immich_mobile/presentation/actions/delete.action.dart';
 import 'package:immich_mobile/presentation/actions/download.action.dart';
+import 'package:immich_mobile/presentation/actions/edit_external.action.dart';
 import 'package:immich_mobile/presentation/actions/lock.action.dart';
 import 'package:immich_mobile/presentation/actions/open_in_browser.action.dart';
 import 'package:immich_mobile/presentation/actions/remove_from_album.action.dart';
@@ -62,6 +63,7 @@ enum ActionButtonType {
   likeActivity,
   share,
   shareLink,
+  editExternal,
   cast,
   setAlbumCover,
   similarPhotos,
@@ -89,6 +91,11 @@ enum ActionButtonType {
       ActionButtonType.shareLink =>
         !context.isInLockedView && //
             context.asset.hasRemote,
+      ActionButtonType.editExternal =>
+        !context.isInLockedView && //
+            context.timelineOrigin != TimelineOrigin.trash && //
+            context.asset.isImage && //
+            context.selectedCount == 1,
       ActionButtonType.archive =>
         context.isOwner && //
             !context.isInLockedView && //
@@ -173,6 +180,7 @@ enum ActionButtonType {
       ActionButtonType.advancedInfo => ActionMenuItem(action: AssetDebugAction(source: context.source)),
       ActionButtonType.share => ActionMenuItem(action: ShareAction(source: context.source)),
       ActionButtonType.shareLink => ActionMenuItem(action: ShareLinkAction(source: context.source)),
+      ActionButtonType.editExternal => ActionMenuItem(action: ExternalEditAction(source: context.source)),
       ActionButtonType.slideshow => const ActionMenuItem(action: SlideshowAction()),
       ActionButtonType.archive ||
       ActionButtonType.unarchive => ActionMenuItem(action: ArchiveAction(source: context.source)),

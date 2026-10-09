@@ -282,6 +282,27 @@ class AssetMediaRepository {
     return null;
   }
 
+  /// Resolves the full-resolution file for [asset]: the gallery original when
+  /// it exists on the device, otherwise a temp download of the server original
+  /// (including applied edits). [tempEntity] is set when the caller must clean
+  /// the file up afterwards.
+  Future<({File file, FileSystemEntity? tempEntity})?> getOriginalFile(
+    BaseAsset asset, {
+    Completer<void>? cancelCompleter,
+    void Function(double progress)? onProgress,
+  }) async {
+    final shareFile = await _getOriginalShareFile(
+      asset,
+      displayName: _shareDisplayName(asset, ShareAssetType.original),
+      cancelCompleter: cancelCompleter,
+      onProgress: onProgress ?? (_) {},
+    );
+    if (shareFile == null) {
+      return null;
+    }
+    return (file: shareFile.file, tempEntity: shareFile.tempEntity);
+  }
+
   /// As of share_plus 10.1.4, sharing copies every file into a single cache
   /// folder regardless of where it came from, and equal names overwrite each
   /// other there. Downloads are renamed to their display name first since
