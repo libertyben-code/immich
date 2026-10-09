@@ -13,6 +13,7 @@ enum ToneAdjustment {
   vibrance,
   warmth,
   tint,
+  sharpness,
 }
 
 /// Adjustments made in the built-in editor. Unlike crop, rotate and mirror

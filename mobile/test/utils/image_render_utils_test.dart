@@ -146,5 +146,41 @@ void main() {
       expect(await renderGrey(tester, 128, vignette), closeTo(128, 4));
       expect(await renderGrey(tester, 128, vignette, x: 1, y: 1), lessThan(64));
     });
+
+    // 32x32 source: left half dark grey, right half light grey
+    Future<img.Image> renderEdge(WidgetTester tester, double sharpness) async {
+      final image = img.Image(width: 32, height: 32);
+      for (final pixel in image) {
+        final level = pixel.x < 16 ? 64 : 192;
+        pixel
+          ..r = level
+          ..g = level
+          ..b = level;
+      }
+      final source = File('${dir.path}/edge.jpg')..writeAsBytesSync(img.encodeJpg(image, quality: 100));
+      return (await tester.runAsync(() async {
+        final output = await renderEditedImage(
+          source: source,
+          geometry: _noTransform,
+          adjustments: _tone(ToneAdjustment.sharpness, sharpness),
+          outputPath: '${dir.path}/edge_out.jpg',
+        );
+        return img.decodeJpg(output.readAsBytesSync())!;
+      }))!;
+    }
+
+    testWidgets('sharpness raises contrast at edges and leaves flat areas', (tester) async {
+      final result = await renderEdge(tester, 1);
+      expect(result.getPixel(15, 16).g, lessThan(50));
+      expect(result.getPixel(16, 16).g, greaterThan(206));
+      expect(result.getPixel(4, 16).g, closeTo(64, 4));
+      expect(result.getPixel(28, 16).g, closeTo(192, 4));
+    });
+
+    testWidgets('negative sharpness softens edges', (tester) async {
+      final result = await renderEdge(tester, -1);
+      expect(result.getPixel(15, 16).g, greaterThan(74));
+      expect(result.getPixel(16, 16).g, lessThan(182));
+    });
   });
 }
