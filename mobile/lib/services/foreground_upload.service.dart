@@ -156,9 +156,13 @@ class ForegroundUploadService {
   }
 
   /// Upload files from shared intent
+  ///
+  /// [fileCreatedAt] overrides the filesystem timestamp, so a derived file
+  /// (e.g. an externally edited copy) lands next to its source in the timeline.
   Future<void> uploadShareIntent(
     List<File> files, {
     Completer<void>? cancelToken,
+    DateTime? fileCreatedAt,
     void Function(String fileId, int bytes, int totalBytes)? onProgress,
     void Function(String fileId, String remoteAssetId)? onSuccess,
     void Function(String fileId, String errorMessage)? onError,
@@ -176,6 +180,7 @@ class ForegroundUploadService {
           file,
           deviceAssetId: fileId,
           cancelToken: cancelToken,
+          fileCreatedAt: fileCreatedAt,
           onProgress: (bytes, totalBytes) => onProgress?.call(fileId, bytes, totalBytes),
         );
 
@@ -432,12 +437,13 @@ class ForegroundUploadService {
     File file, {
     required String deviceAssetId,
     required Completer<void>? cancelToken,
+    DateTime? fileCreatedAt,
     void Function(int bytes, int totalBytes)? onProgress,
   }) async {
     try {
       // ignore: avoid_slow_async_io
       final stats = await file.stat();
-      final fileCreatedAt = stats.changed;
+      fileCreatedAt ??= stats.changed;
       final fileModifiedAt = stats.modified;
       final filename = p.basename(file.path);
 
