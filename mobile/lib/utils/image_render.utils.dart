@@ -18,8 +18,10 @@ const _jpegQuality = 92;
 /// applied to the cropped image and [rotation] (clockwise degrees) last.
 typedef RenderGeometry = ({Rect crop, int rotation, bool flipHorizontal, bool flipVertical});
 
+typedef RenderSize = ({int width, int height});
+
 /// Size of the saved image for a source of [width] x [height] pixels.
-({int width, int height}) renderedSize(int width, int height, RenderGeometry geometry, int? maxLongEdge) {
+RenderSize renderedSize(int width, int height, RenderGeometry geometry, int? maxLongEdge) {
   final cropWidth = geometry.crop.width * width;
   final cropHeight = geometry.crop.height * height;
   final quarterTurned = _normalizeRotation(geometry.rotation) % 180 != 0;
@@ -27,6 +29,36 @@ typedef RenderGeometry = ({Rect crop, int rotation, bool flipHorizontal, bool fl
   final outHeight = quarterTurned ? cropWidth : cropHeight;
   final scale = maxLongEdge == null ? 1.0 : min(1.0, maxLongEdge / max(outWidth, outHeight));
   return (width: max(1, (outWidth * scale).round()), height: max(1, (outHeight * scale).round()));
+}
+
+Future<ui.FragmentProgram>? _adjustProgram;
+
+/// The shader applying the [ToneAdjustment]s, loaded once.
+Future<ui.FragmentProgram> loadAdjustmentShader() =>
+    _adjustProgram ??= ui.FragmentProgram.fromAsset('shaders/image_adjust.frag');
+
+/// Crops, mirrors, rotates and scales [source] as the editor shows it. Used
+/// for the live preview; the caller owns the returned image.
+ui.Image frameImageSync(ui.Image source, RenderGeometry geometry, {int? maxLongEdge}) {
+  final size = renderedSize(source.width, source.height, geometry, maxLongEdge);
+  final picture = _framePicture(source, size, geometry);
+  try {
+    return picture.toImageSync(size.width, size.height);
+  } finally {
+    picture.dispose();
+  }
+}
+
+/// Applies the tone adjustments to an already framed [source]. Used for the
+/// live preview; the caller owns the returned image.
+ui.Image adjustImageSync(ui.FragmentProgram program, ui.Image source, ImageAdjustments adjustments) {
+  final (picture, shader) = _adjustPicture(program, source, adjustments);
+  try {
+    return picture.toImageSync(source.width, source.height);
+  } finally {
+    picture.dispose();
+    shader.dispose();
+  }
 }
 
 /// Renders [source] with the editor's geometry and [adjustments] into a new
@@ -38,21 +70,39 @@ Future<File> renderEditedImage({
   required ImageAdjustments adjustments,
   required String outputPath,
 }) async {
+  final program = adjustments.hasToneChanges ? await loadAdjustmentShader() : null;
+
   // Flutter's decoder applies the EXIF orientation, matching what the editor shows
   final buffer = await ui.ImmutableBuffer.fromFilePath(source.path);
   final codec = await ui.instantiateImageCodecFromBuffer(buffer);
-  final ui.Image image;
+  final ui.Image decoded;
   try {
-    image = (await codec.getNextFrame()).image;
+    decoded = (await codec.getNextFrame()).image;
   } finally {
     codec.dispose();
   }
 
-  final ByteData pixels;
-  final ({int width, int height}) size;
+  final size = renderedSize(decoded.width, decoded.height, geometry, adjustments.maxLongEdge);
+  ui.Image image;
   try {
-    size = renderedSize(image.width, image.height, geometry, adjustments.maxLongEdge);
-    pixels = await _draw(image, size, geometry, adjustments);
+    image = await _toImage(_framePicture(decoded, size, geometry), size);
+  } finally {
+    decoded.dispose();
+  }
+
+  final ByteData pixels;
+  try {
+    if (program != null) {
+      final (picture, shader) = _adjustPicture(program, image, adjustments);
+      final adjusted = await _toImage(picture, size).whenComplete(shader.dispose);
+      image.dispose();
+      image = adjusted;
+    }
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (bytes == null) {
+      throw StateError('Could not read the rendered image');
+    }
+    pixels = bytes;
   } finally {
     image.dispose();
   }
@@ -62,12 +112,15 @@ Future<File> renderEditedImage({
   return File(outputPath).writeAsBytes(jpeg, flush: true);
 }
 
-Future<ByteData> _draw(
-  ui.Image image,
-  ({int width, int height}) size,
-  RenderGeometry geometry,
-  ImageAdjustments adjustments,
-) async {
+Future<ui.Image> _toImage(ui.Picture picture, RenderSize size) async {
+  try {
+    return await picture.toImage(size.width, size.height);
+  } finally {
+    picture.dispose();
+  }
+}
+
+ui.Picture _framePicture(ui.Image image, RenderSize size, RenderGeometry geometry) {
   final crop = geometry.crop;
   final src = Rect.fromLTWH(
     crop.left * image.width,
@@ -82,9 +135,6 @@ Future<ByteData> _draw(
   final paint = Paint()
     ..filterQuality = FilterQuality.high
     ..isAntiAlias = true;
-  if (adjustments.hasColorChanges) {
-    paint.colorFilter = ColorFilter.matrix(adjustments.colorMatrix);
-  }
 
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder)
@@ -97,19 +147,28 @@ Future<ByteData> _draw(
     Rect.fromCenter(center: Offset.zero, width: src.width * scale, height: src.height * scale),
     paint,
   );
+  return recorder.endRecording();
+}
 
-  final picture = recorder.endRecording();
-  final rendered = await picture.toImage(size.width, size.height);
-  picture.dispose();
-  try {
-    final bytes = await rendered.toByteData(format: ui.ImageByteFormat.rawRgba);
-    if (bytes == null) {
-      throw StateError('Could not read the rendered image');
-    }
-    return bytes;
-  } finally {
-    rendered.dispose();
+/// The shader must outlive the picture's rasterization; dispose both after.
+(ui.Picture, ui.FragmentShader) _adjustPicture(
+  ui.FragmentProgram program,
+  ui.Image source,
+  ImageAdjustments adjustments,
+) {
+  final shader = program.fragmentShader()
+    ..setFloat(0, source.width.toDouble())
+    ..setFloat(1, source.height.toDouble());
+  for (final tone in ToneAdjustment.values) {
+    shader.setFloat(2 + tone.index, adjustments[tone]);
   }
+  shader.setImageSampler(0, source);
+
+  final recorder = ui.PictureRecorder();
+  Canvas(
+    recorder,
+  ).drawRect(Rect.fromLTWH(0, 0, source.width.toDouble(), source.height.toDouble()), Paint()..shader = shader);
+  return (recorder.endRecording(), shader);
 }
 
 Uint8List _encodeJpeg(ByteData pixels, int width, int height, String sourcePath) {

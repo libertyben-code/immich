@@ -129,6 +129,8 @@ flutter:
   assets:
     - assets/
     - assets/feature_message/
+  shaders:
+    - shaders/image_adjust.frag
   fonts:
     - family: GoogleSans
       fonts:
